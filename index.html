@@ -145,10 +145,20 @@ function defaultState(){
   return {
     filter:{src:'全部', types:{'单选':true,'多选':true,'判断':true,'填空':false,'问答':false}},
     stats:{done:0, correct:0, bySrc:{}, byType:{}},
-    wrong:{}, fav:[], exams:[], last:null
+    wrong:{}, fav:[], exams:[], last:null, progress:null
   };
 }
-function loadState(){ try{ return JSON.parse(localStorage.getItem(LS_KEY)) || defaultState(); }catch(e){ return defaultState(); } }
+function loadState(){
+  try{
+    var raw=localStorage.getItem(LS_KEY);
+    if(!raw)return defaultState();
+    var s=JSON.parse(raw);
+    if(!s||typeof s!=='object')return defaultState();
+    var d=defaultState();
+    for(var k in d){ if(s[k]===undefined)s[k]=d[k]; }
+    return s;
+  }catch(e){ return defaultState(); }
+}
 var S = loadState();
 function saveState(){ try{ localStorage.setItem(LS_KEY, JSON.stringify(S)); }catch(e){} }
 
@@ -202,7 +212,7 @@ function render(){
   else if(curView==='stats')renderStats();
   window.scrollTo(0,0);
 }
-function onTabPractice(){ if(P && P.list && P.list.length && !P.isExam){ curView='practice'; render(); } else { startPractice(false); } }
+function onTabPractice(){ if(P && P.list && P.list.length && !P.isExam){ curView='practice'; render(); } else if(!resumePractice()){ startPractice(false); } }
 function onTabExam(){ if(E && !E.result){ curView='exam'; render(); } else { showView('examSetup'); } }
 
 /* ============ 首页 ============ */
@@ -216,6 +226,23 @@ function renderHome(){
   hero.appendChild(el('div','small', done?('累计正确率 '+rate+'% · 错题 '+wrongN+' 道 · 已刷 '+Object.keys(S.stats.bySrc).length+' 个题库'):('题库共 '+QS.length+' 题 · 覆盖 '+SRC_LIST.length+' 个来源')));
   if(S.last){ hero.appendChild(el('div','small','最近完成：'+S.last.name+' · 共 '+S.last.total+' 题')); }
   v.appendChild(hero);
+  if(S.progress && S.progress.seq && S.progress.seq.length){
+    var pr=S.progress;
+    var rc=el('div','card');
+    rc.style.cssText='border:1.5px solid var(--primary)';
+    rc.appendChild(el('h2',null,'继续上次刷题'));
+    var dn=el('div','', '第 '+((pr.idx||0)+1)+' 题 / 共 '+pr.seq.length+' 题 · '+(pr.random?'随机练习':'顺序练习'));
+    dn.style.cssText='font-size:.78rem;color:var(--sub);margin-bottom:11px;line-height:1.5';
+    rc.appendChild(dn);
+    var rr=el('div','row-btns');
+    var rb1=el('button','primary-btn','继续刷题');
+    rb1.onclick=function(){ resumePractice(); };
+    var rb2=el('button','ghost-btn','从头开始');
+    rb2.onclick=function(){ S.progress=null; saveState(); startPractice(false); };
+    rr.appendChild(rb1); rr.appendChild(rb2);
+    rc.appendChild(rr);
+    v.appendChild(rc);
+  }
   var grid=el('div','grid2');
   grid.appendChild(modeCard('✏️','顺序练习','按筛选顺序逐题刷','order'));
   grid.appendChild(modeCard('🎲','随机练习','随机抽题打乱顺序','random'));
@@ -260,13 +287,32 @@ function startPractice(random){
   var list=filterQuestions();
   if(random)list=shuffle(list);
   if(!list.length){ toast('当前筛选下没有题目'); return; }
-  P={list:list,idx:0,sel:[],answered:false,isExam:false,random:random};
+  P={list:list,idx:0,sel:[],answered:false,isExam:false,random:random,seq:list.map(function(q){return q.gi;})};
+  saveProgress();
   curView='practice'; render();
+}
+/* 进度记忆：每次翻题写入 localStorage，下次打开可续刷 */
+function saveProgress(){
+  if(!P||P.isExam||!P.seq||!P.seq.length)return;
+  var nextIdx=P.answered?Math.min(P.idx+1,P.seq.length-1):P.idx;
+  S.progress={seq:P.seq,idx:nextIdx,random:!!P.random,ts:Date.now()};
+  saveState();
+}
+function resumePractice(){
+  var pr=S.progress;
+  if(!pr||!pr.seq||!pr.seq.length)return false;
+  var list=[];
+  pr.seq.forEach(function(gi){ if(QS[gi])list.push(QS[gi]); });
+  if(!list.length)return false;
+  P={list:list,idx:Math.min(pr.idx||0,list.length-1),sel:[],answered:false,isExam:false,random:!!pr.random,seq:pr.seq,resumed:true};
+  curView='practice'; render();
+  return true;
 }
 function renderPractice(){
   if(!P){ curView='home'; render(); return; }
   $('topTitle').textContent=P.isExam?'模拟考试':'练习模式';
   var v=$('view'); v.innerHTML='';
+  if(P.resumed){ P.resumed=false; setTimeout(function(){ toast('已从上次进度继续 · 第 '+(P.idx+1)+' / '+P.list.length+' 题'); },150); }
   var q=P.list[P.idx], total=P.list.length;
   var card=el('div','card');
   var meta=el('div','q-meta');
@@ -345,6 +391,7 @@ function renderPractice(){
   c.appendChild(btns);
   v.appendChild(c);
   if(P.answered)showFeedback(q);
+  saveProgress();
 }
 function showFeedback(q){
   var fb=$('feedback'); if(!fb)return;
@@ -372,6 +419,7 @@ function showFeedback(q){
 }
 function finishPractice(){
   S.last={name:(P.random?'随机练习':'顺序练习'),correct:0,total:P.list.length,date:new Date().toDateString()};
+  S.progress=null;
   saveState(); toast('本组练习完成'); showView('stats');
 }
 
@@ -614,7 +662,8 @@ function renderReview(){
 }
 function startList(gis){
   var list=gis.map(function(gi){return QS[gi];});
-  P={list:list,idx:0,sel:[],answered:false,isExam:false,random:false};
+  P={list:list,idx:0,sel:[],answered:false,isExam:false,random:false,seq:gis.slice()};
+  saveProgress();
   curView='practice'; render();
 }
 
